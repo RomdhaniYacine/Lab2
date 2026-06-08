@@ -7,17 +7,14 @@
 ## Contexte
 
 L'API interne `freemobile-netops-api` (gestion d'équipements réseau NOC) va passer en production.
-Un audit SAST est requis. L'application contient **6 vulnérabilités** à détecter et corriger.
+Un audit SAST est requis. L'application contient **6 vulnérabilités** à identifier, comprendre et corriger.
 
 ---
 
 ## Prérequis
 
-```bash
-# Vérifier les installations
-docker --version
-semgrep --version   # sinon : pip install semgrep
-```
+- Docker
+- Semgrep — [docs.semgrep.dev](https://docs.semgrep.dev)
 
 ---
 
@@ -29,180 +26,56 @@ cd Lab2
 docker compose up
 ```
 
-Tester que l'app répond :
-
-```bash
-curl http://localhost:5000/health
-curl http://localhost:5000/api/v1/equipment
-```
-
 ---
 
-## Étape 1 — Scanner avec Semgrep (en ligne de commande)
+## Étape 1 — Scanner avec Semgrep
 
-### 1.1 — Premier scan
+Utilisez Semgrep pour analyser `app.py` et détecter les vulnérabilités présentes.
 
-```bash
-semgrep --config p/python app.py
-```
-
-Semgrep affiche les vulnérabilités détectées avec le fichier, la ligne, et une explication.
-
-### 1.2 — Voir le code incriminé
-
-```bash
-semgrep --config p/python app.py --verbose
-```
-
-### 1.3 — Exporter le rapport en JSON
-
-```bash
-semgrep --config p/python app.py --json > semgrep-report.json
-cat semgrep-report.json | python3 -m json.tool
-```
+> Référence : [docs.semgrep.dev/getting-started](https://docs.semgrep.dev/getting-started/)
 
 **Questions :**
-- Combien de vulnérabilités ont été détectées ?
-- Quelles sont celles que Semgrep a **manquées** en regardant le code ? (MD5, random)
-- Quel est l'exit code de Semgrep quand il trouve des problèmes ?
-
-```bash
-echo "Exit code : $?"
-# 0 = aucun finding  |  1 = findings détectés
-```
+- Combien de vulnérabilités Semgrep a-t-il détectées ?
+- Lesquelles n'ont **pas** été détectées ? Pourquoi ?
+- Que signifie l'exit code retourné par Semgrep ?
 
 ---
 
 ## Étape 2 — Corriger le code
 
-Voici les 6 corrections à appliquer dans `app.py` :
+Les 6 vulnérabilités présentes dans `app.py` :
 
-### Vuln 1 — SQL Injection (ligne ~60)
+| # | Type | Impact |
+|---|---|---|
+| 1 | SQL Injection | Extraction de toutes les données |
+| 2 | OS Command Injection | Exécution de commandes sur le serveur |
+| 3 | Weak Cryptography (MD5) | Compromission des mots de passe |
+| 4 | Insecure Deserialization (pickle) | Remote Code Execution |
+| 5 | Code Injection (eval) | Exécution de code Python arbitraire |
+| 6 | Insecure Random | Token de session prévisible |
 
-```python
-# Avant — concaténation directe → SQLi
-rows = conn.execute(
-    f"SELECT * FROM equipment WHERE hostname LIKE '%{query}%'"
-).fetchall()
-
-# Après — requête paramétrée
-rows = conn.execute(
-    "SELECT * FROM equipment WHERE hostname LIKE ? OR site LIKE ?",
-    (f"%{query}%", f"%{query}%")
-).fetchall()
-```
-
-### Vuln 2 — Command Injection (ligne ~73)
-
-```python
-# Avant — shell=True + input user
-result = subprocess.run(f"ping -c 2 {ip}", shell=True, ...)
-
-# Après — liste d'args + validation IP
-import ipaddress
-try:
-    ipaddress.ip_address(ip)
-except ValueError:
-    return jsonify({"error": "IP invalide"}), 400
-result = subprocess.run(["ping", "-c", "2", ip], capture_output=True, text=True, timeout=10)
-```
-
-### Vuln 3 — MD5 pour les mots de passe (ligne ~88)
-
-```python
-# Avant — MD5 sans sel, cassable
-hashed = hashlib.md5(password.encode()).hexdigest()
-
-# Après — SHA-256 avec sel
-import os
-salt = os.urandom(16).hex()
-hashed = hashlib.sha256((salt + password).encode()).hexdigest()
-```
-
-### Vuln 4 — Insecure Deserialization pickle (ligne ~100)
-
-```python
-# Avant — pickle sur données HTTP → RCE possible
-config = pickle.loads(raw)
-
-# Après — JSON uniquement
-import json
-try:
-    config = json.loads(raw)
-except json.JSONDecodeError:
-    return jsonify({"error": "JSON invalide"}), 400
-```
-
-### Vuln 5 — eval() sur input utilisateur (ligne ~111)
-
-```python
-# Avant — eval() → exécution de code arbitraire
-result = eval(rule)
-
-# Après — ast.literal_eval() limité aux types simples
-import ast
-try:
-    result = ast.literal_eval(rule)
-except (ValueError, SyntaxError):
-    return jsonify({"error": "Expression invalide"}), 400
-```
-
-### Vuln 6 — Token généré avec random (ligne ~121)
-
-```python
-# Avant — random prévisible, pas cryptographiquement sûr
-token = str(random.randint(100000, 999999))
-
-# Après — secrets pour tout usage sécurité
-import secrets
-token = secrets.token_hex(32)
-```
-
-### Vérifier les corrections
-
-```bash
-semgrep --config p/python app.py
-echo "Exit code : $?"
-# Résultat attendu : 0 finding, exit code 0
-```
+Corrigez chaque vulnérabilité. Après correction, relancez Semgrep — le résultat doit être **0 finding**.
 
 ---
 
 ## Étape 3 — Pipeline CI GitHub Actions
 
-Ouvrez `.github/workflows/security.yml` et décommentez le bloc `TODO` :
+Activez le pipeline Semgrep dans `.github/workflows/security.yml` (bloc `TODO`), committez et poussez.
 
-```yaml
-      # Remplacer les lignes commentées par :
-      - name: Semgrep scan
-        run: semgrep --config p/python --error app.py
-```
+Vérifiez que :
+- Le pipeline **échoue** sur le code vulnérable
+- Le pipeline **passe** sur le code corrigé
 
-Committer et pousser :
-
-```bash
-git add app.py .github/workflows/security.yml
-git commit -m "fix: corrections SAST + pipeline Semgrep"
-git push
-```
-
-Vérifier le pipeline sur `https://github.com/RomdhaniYacine/Lab2/actions`.
-
-**Avec le code vulnérable :** le pipeline échoue (exit code 1).  
-**Avec le code corrigé :** le pipeline passe (exit code 0).
+> Référence : [semgrep.dev/docs/semgrep-ci](https://semgrep.dev/docs/semgrep-ci/running-semgrep-ci-with-a-third-party-ci-provider/)
 
 ---
 
 ## Checklist de réussite
 
 ```
-[ ] semgrep --config p/python app.py  →  0 finding après corrections
-[ ] SQL injection corrigée  (requête paramétrée)
-[ ] Command injection corrigée  (liste d'args + validation IP)
-[ ] MD5 remplacé  (sha256 avec sel)
-[ ] pickle remplacé  (json.loads)
-[ ] eval() remplacé  (ast.literal_eval)
-[ ] random remplacé  (secrets.token_hex)
+[ ] Semgrep installé et fonctionnel
+[ ] Vulnérabilités identifiées et comprises
+[ ] 0 finding après correction
 [ ] Pipeline CI vert sur GitHub
 ```
 
@@ -210,4 +83,4 @@ Vérifier le pipeline sur `https://github.com/RomdhaniYacine/Lab2/actions`.
 
 ## Solution
 
-Le code corrigé et le pipeline complet sont dans `solution/`.
+Dans `solution/` — à consulter uniquement après avoir terminé.
